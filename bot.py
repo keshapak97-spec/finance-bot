@@ -1,11 +1,16 @@
 import logging
 import os
+import json
+import re
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+import threading
+
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CommandHandler
 import gspread
 from google.oauth2.service_account import Credentials
-import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,7 +22,6 @@ ADMIN_ID = 879637514
 USER2_ID = 753036716
 ALLOWED  = [ADMIN_ID, USER2_ID]
 
-# Категории
 EXPENSE_CATS = ["🍔 Еда", "🚗 Транспорт", "🏠 ЖКХ", "💊 Здоровье",
                 "👕 Одежда", "🎮 Развлечения", "☕ Кафе", "📱 Связь",
                 "✈️ Путешествия", "🏋️ Спорт", "📚 Образование", "🐾 Другое"]
@@ -29,8 +33,7 @@ MONTHS = ["Январь","Февраль","Март","Апрель","Май","И
 
 # ── Google Sheets ────────────────────────────────────────────
 def get_sheets():
-    creds_json = os.environ["GOOGLE_CREDS"]
-    creds_dict = json.loads(creds_json)
+    creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
     creds = Credentials.from_service_account_info(
         creds_dict,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
@@ -44,32 +47,219 @@ def get_sheets():
     }
 
 def fmt(n):
-    try:
-        return f"{float(n):,.0f}".replace(",", " ")
-    except:
-        return str(n)
+    try: return f"{float(n):,.0f}".replace(",", " ")
+    except: return str(n)
 
 def pbar(pct):
     f = round(pct / 10)
     return "█" * f + "░" * (10 - f)
 
-# ── Клавиатура ───────────────────────────────────────────────
+# ── Клавиатуры ───────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup(
     [["Расход", "Доход"], ["Статистика", "Цели"]],
-    resize_keyboard=True,
-    is_persistent=True
+    resize_keyboard=True, is_persistent=True
 )
+CANCEL_KB = ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
 
-CANCEL_KB = ReplyKeyboardMarkup(
-    [["❌ Отмена"]],
-    resize_keyboard=True
-)
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  API СЕРВЕР ДЛЯ MINI APP                                   ║
+# ╚══════════════════════════════════════════════════════════════╝
 
-# ── /start ───────────────────────────────────────────────────
+class APIHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # Отключаем лишние логи
+
+    def send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        path   = parsed.path
+
+        if path == "/api/stats":
+            user_id = params.get("userId", [None])[0]
+            if not user_id:
+                self.send_json({"error": "no userId"}, 400); return
+            self.send_json(get_stats(user_id))
+
+        elif path == "/api/goals":
+            user_id = params.get("userId", [None])[0]
+            if not user_id:
+                self.send_json({"error": "no userId"}, 400); return
+            self.send_json(get_goals_data(user_id))
+
+        elif path == "/api/transactions":
+            user_id = params.get("userId", [None])[0]
+            limit   = int(params.get("limit", [30])[0])
+            if not user_id:
+                self.send_json({"error": "no userId"}, 400); return
+            self.send_json(get_transactions(user_id, limit))
+
+        elif path == "/health":
+            self.send_json({"status": "ok"})
+        else:
+            self.send_json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        parsed  = urlparse(self.path)
+        path    = parsed.path
+        length  = int(self.headers.get("Content-Length", 0))
+        body    = json.loads(self.rfile.read(length)) if length else {}
+
+        if path == "/api/goals/add":
+            result = add_goal(body.get("userId"), body.get("name"), body.get("target"), body.get("deadline",""))
+            self.send_json(result)
+        elif path == "/api/goals/deposit":
+            result = deposit_goal(body.get("userId"), body.get("goalId"), body.get("amount"))
+            self.send_json(result)
+        elif path == "/api/goals/delete":
+            result = delete_goal_api(body.get("userId"), body.get("goalId"))
+            self.send_json(result)
+        else:
+            self.send_json({"error": "not found"}, 404)
+
+def get_stats(user_id):
+    sheets = get_sheets()
+    rows   = sheets["tx"].get_all_values()[1:]
+    now    = datetime.now()
+    m, y   = now.month - 1, now.year
+
+    p = {"income":0,"expense":0,"monthIncome":0,"monthExpense":0,"cats":{},"monthly":{}}
+    j = {"income":0,"expense":0,"monthIncome":0,"monthExpense":0,"monthly":{}}
+
+    for r in rows:
+        if not r[0]: continue
+        try:
+            amt  = float(r[3])
+            date = datetime.strptime(r[0][:10], "%Y-%m-%d")
+            cat  = r[4] or "Другое"
+            uid  = str(r[1])
+            typ  = r[2]
+            mk   = f"{date.year}-{date.month:02d}"
+        except: continue
+
+        is_me = uid == str(user_id)
+
+        if typ == "Доход":
+            j["income"] += amt
+            j["monthly"].setdefault(mk, {"income":0,"expense":0})
+            j["monthly"][mk]["income"] += amt
+            if is_me:
+                p["income"] += amt
+                p["monthly"].setdefault(mk, {"income":0,"expense":0})
+                p["monthly"][mk]["income"] += amt
+        else:
+            j["expense"] += amt
+            j["monthly"].setdefault(mk, {"income":0,"expense":0})
+            j["monthly"][mk]["expense"] += amt
+            if is_me:
+                p["expense"] += amt
+                p["cats"][cat] = p["cats"].get(cat, 0) + amt
+                p["monthly"].setdefault(mk, {"income":0,"expense":0})
+                p["monthly"][mk]["expense"] += amt
+
+        if date.month - 1 == m and date.year == y:
+            if typ == "Доход":
+                j["monthIncome"] += amt
+                if is_me: p["monthIncome"] += amt
+            else:
+                j["monthExpense"] += amt
+                if is_me: p["monthExpense"] += amt
+
+    return {"personal": p, "joint": j, "month": MONTHS[m], "year": y}
+
+def get_goals_data(user_id):
+    sheets = get_sheets()
+    rows   = sheets["goals"].get_all_values()[1:]
+    goals  = []
+    for r in rows:
+        if r[0] and str(r[1]) == str(user_id):
+            goals.append({
+                "id": r[0], "name": r[2],
+                "target": float(r[3]) if r[3] else 0,
+                "current": float(r[4]) if r[4] else 0,
+                "deadline": r[5] if len(r) > 5 else ""
+            })
+    return goals
+
+def get_transactions(user_id, limit=30):
+    sheets = get_sheets()
+    rows   = sheets["tx"].get_all_values()[1:]
+    result = []
+    for r in reversed(rows):
+        if not r[0] or str(r[1]) != str(user_id): continue
+        result.append({
+            "date": r[0][:10], "type": r[2],
+            "amount": float(r[3]) if r[3] else 0,
+            "category": r[4], "comment": r[5] if len(r) > 5 else ""
+        })
+        if len(result) >= limit: break
+    return result
+
+def add_goal(user_id, name, target, deadline):
+    if not all([user_id, name, target]): return {"success": False}
+    sheets  = get_sheets()
+    goal_id = f"g_{user_id}_{int(datetime.now().timestamp())}"
+    sheets["goals"].append_row([goal_id, user_id, name, float(target), 0, deadline or ""])
+    return {"success": True, "id": goal_id}
+
+def deposit_goal(user_id, goal_id, amount):
+    if not all([user_id, goal_id, amount]): return {"success": False}
+    sheets = get_sheets()
+    rows   = sheets["goals"].get_all_values()
+    for i, r in enumerate(rows[1:], start=2):
+        if r[0] == goal_id and str(r[1]) == str(user_id):
+            new_val = (float(r[4]) if r[4] else 0) + float(amount)
+            sheets["goals"].update_cell(i, 5, new_val)
+            return {"success": True, "current": new_val}
+    return {"success": False}
+
+def delete_goal_api(user_id, goal_id):
+    if not all([user_id, goal_id]): return {"success": False}
+    sheets = get_sheets()
+    rows   = sheets["goals"].get_all_values()
+    for i, r in enumerate(rows[1:], start=2):
+        if r[0] == goal_id and str(r[1]) == str(user_id):
+            sheets["goals"].delete_rows(i)
+            return {"success": True}
+    return {"success": False}
+
+def start_api_server():
+    port   = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), APIHandler)
+    logger.info(f"API server on port {port}")
+    server.serve_forever()
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  БОТ                                                        ║
+# ╚══════════════════════════════════════════════════════════════╝
+
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ALLOWED:
-        return
+    if update.effective_user.id not in ALLOWED: return
     ctx.user_data.clear()
+    user_id = update.effective_user.id
+    app_url = f"https://{os.environ.get('GITHUB_PAGES_URL', '')}?userId={user_id}"
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📱 Открыть Mini App", web_app={"url": app_url})
+    ]]) if os.environ.get("GITHUB_PAGES_URL") else None
+
     await update.message.reply_text(
         "👋 Привет! Используй кнопки внизу:\n\n"
         "Расход — записать трату\n"
@@ -78,31 +268,27 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Цели — цели накопления",
         reply_markup=MAIN_KB
     )
+    if kb:
+        await update.message.reply_text("📱 Mini App:", reply_markup=kb)
 
-# ── Обработка текстовых сообщений ───────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in ALLOWED:
-        return
-
-    text = update.message.text.strip()
+    if user_id not in ALLOWED: return
+    text  = update.message.text.strip()
     state = ctx.user_data.get("state")
 
-    # Отмена
     if text == "❌ Отмена":
         ctx.user_data.clear()
         await update.message.reply_text("Отменено.", reply_markup=MAIN_KB)
         return
 
-    # Главные кнопки
     if text == "Расход":
         ctx.user_data.clear()
-        ctx.user_data["state"]  = "awaiting_amount"
+        ctx.user_data["state"]   = "awaiting_amount"
         ctx.user_data["tx_type"] = "Расход"
         await update.message.reply_text(
             "📉 Расход\n\nВведи сумму и описание:\n• 500 обед\n• 1200 такси\n• 45000",
-            reply_markup=CANCEL_KB
-        )
+            reply_markup=CANCEL_KB)
         return
 
     if text == "Доход":
@@ -111,8 +297,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["tx_type"] = "Доход"
         await update.message.reply_text(
             "📈 Доход\n\nВведи сумму и описание:\n• 45000 зарплата\n• 5000 фриланс",
-            reply_markup=CANCEL_KB
-        )
+            reply_markup=CANCEL_KB)
         return
 
     if text == "Статистика":
@@ -125,110 +310,76 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_goals_menu(update, ctx)
         return
 
-    # Состояния
     if state == "awaiting_amount":
-        await handle_amount(update, ctx, text)
-        return
-
+        await handle_amount(update, ctx, text); return
     if state == "awaiting_own_cat":
-        await handle_own_category(update, ctx, text)
-        return
-
+        await handle_own_category(update, ctx, text); return
     if state == "goal_name":
         ctx.user_data["goal_name"] = text.strip()
         ctx.user_data["state"]     = "goal_amount"
-        await update.message.reply_text(
-            f"✅ Название: {text.strip()}\n\nВведи сумму цели (₽):",
-            reply_markup=CANCEL_KB
-        )
+        await update.message.reply_text(f"✅ Название: {text.strip()}\n\nВведи сумму цели (₽):", reply_markup=CANCEL_KB)
         return
-
     if state == "goal_amount":
         try:
-            amt = float(text.replace(" ", "").replace(",", "."))
-            assert amt > 0
+            amt = float(text.replace(" ","").replace(",",".")); assert amt > 0
         except:
-            await update.message.reply_text("⚠️ Введи корректную сумму:", reply_markup=CANCEL_KB)
-            return
+            await update.message.reply_text("⚠️ Введи корректную сумму:", reply_markup=CANCEL_KB); return
         ctx.user_data["goal_amount"] = amt
         ctx.user_data["state"]       = "goal_deadline"
         await update.message.reply_text(
             f"✅ Сумма: {fmt(amt)} ₽\n\nВведи дедлайн (например: 31.12.2025)\nили напиши нет:",
-            reply_markup=ReplyKeyboardMarkup([["нет"], ["❌ Отмена"]], resize_keyboard=True)
-        )
+            reply_markup=ReplyKeyboardMarkup([["нет"],["❌ Отмена"]], resize_keyboard=True))
         return
-
     if state == "goal_deadline":
         deadline = "" if text.lower() == "нет" else text.strip()
-        await finish_add_goal(update, ctx, deadline)
-        return
-
+        await finish_add_goal(update, ctx, deadline); return
     if state == "goal_deposit":
-        await handle_goal_deposit(update, ctx, text)
-        return
+        await handle_goal_deposit(update, ctx, text); return
 
-    # Ничего не совпало — показываем старт
     ctx.user_data.clear()
     await start(update, ctx)
 
-# ── Ввод суммы ───────────────────────────────────────────────
-async def handle_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
-    import re
+async def handle_amount(update, ctx, text):
     match = re.search(r"(\d[\d\s]*(?:[.,]\d+)?)", text)
     if not match:
-        await update.message.reply_text(
-            "❓ Не нашёл сумму. Попробуй:\n• 500 обед\n• 1200",
-            reply_markup=CANCEL_KB
-        )
+        await update.message.reply_text("❓ Не нашёл сумму. Попробуй:\n• 500 обед\n• 1200", reply_markup=CANCEL_KB)
         return
-
-    amount  = float(match.group(1).replace(" ", "").replace(",", "."))
+    amount  = float(match.group(1).replace(" ","").replace(",","."))
     comment = text.replace(match.group(0), "").strip()
-    tx_type = ctx.user_data["tx_type"]
-
     ctx.user_data["state"]      = "awaiting_cat"
     ctx.user_data["tx_amount"]  = amount
     ctx.user_data["tx_comment"] = comment
+    await show_category_buttons(update, ctx, ctx.user_data["tx_type"], amount, comment)
 
-    await show_category_buttons(update, ctx, tx_type, amount, comment)
-
-async def show_category_buttons(update: Update, ctx: ContextTypes.DEFAULT_TYPE, tx_type, amount, comment):
+async def show_category_buttons(update, ctx, tx_type, amount, comment):
     sheets   = get_sheets()
     all_rows = sheets["cats"].get_all_values()[1:]
     user_id  = str(update.effective_user.id)
-    custom   = [r[1] for r in all_rows if len(r) > 1 and str(r[0]) == user_id and r[1]]
+    custom   = [r[1] for r in all_rows if len(r)>1 and str(r[0])==user_id and r[1]]
+    default  = EXPENSE_CATS if tx_type == "Расход" else INCOME_CATS
+    all_cats = list(dict.fromkeys(default + custom))
 
-    default_cats = EXPENSE_CATS if tx_type == "Расход" else INCOME_CATS
-    all_cats     = list(dict.fromkeys(default_cats + custom))
-
-    # Кнопки по 2 в ряд
     rows = []
     for i in range(0, len(all_cats), 2):
         row = [InlineKeyboardButton(all_cats[i], callback_data=f"cat:{all_cats[i]}")]
-        if i + 1 < len(all_cats):
+        if i+1 < len(all_cats):
             row.append(InlineKeyboardButton(all_cats[i+1], callback_data=f"cat:{all_cats[i+1]}"))
         rows.append(row)
     rows.append([InlineKeyboardButton("➕ Своя категория", callback_data="cat:__own__")])
 
     emoji = "📉" if tx_type == "Расход" else "📈"
     text  = f"{emoji} {tx_type}: {fmt(amount)} ₽"
-    if comment:
-        text += f"\n💬 {comment}"
+    if comment: text += f"\n💬 {comment}"
     text += "\n\nВыбери категорию:"
-
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
-# ── Обработка кнопок ─────────────────────────────────────────
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
     user_id = query.from_user.id
     data    = query.data
     await query.answer()
+    if user_id not in ALLOWED: return
 
-    if user_id not in ALLOWED:
-        return
-
-    # Категория транзакции
     if data.startswith("cat:"):
         cat = data[4:]
         if cat == "__own__":
@@ -238,330 +389,191 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await finish_tx(query, ctx, cat)
         return
 
-    # Статистика
-    if data == "stats_my":
-        await send_my_stats(query, ctx)
-        return
-    if data == "stats_joint":
-        await send_joint_stats(query, ctx)
-        return
-
-    # Цели
+    if data == "stats_my":    await send_my_stats(query, ctx);    return
+    if data == "stats_joint": await send_joint_stats(query, ctx); return
     if data == "goals_add":
         ctx.user_data.clear()
         ctx.user_data["state"] = "goal_name"
-        await query.message.reply_text(
-            "🎯 Новая цель\n\nВведи название\n(например: Отпуск, Машина, iPhone):",
-            reply_markup=CANCEL_KB
-        )
+        await query.message.reply_text("🎯 Новая цель\n\nВведи название:", reply_markup=CANCEL_KB)
         return
-
     if data == "goals_list":
-        await show_goals_list(query, ctx)
-        return
-
+        await show_goals_list(query, ctx); return
     if data.startswith("goal_dep:"):
         goal_id = data[9:]
-        ctx.user_data["state"]          = "goal_deposit"
+        ctx.user_data["state"]           = "goal_deposit"
         ctx.user_data["deposit_goal_id"] = goal_id
         sheets = get_sheets()
         rows   = sheets["goals"].get_all_values()[1:]
-        goal   = next((r for r in rows if r[0] == goal_id and str(r[1]) == str(user_id)), None)
-        if not goal:
-            await query.edit_message_text("⚠️ Цель не найдена.")
-            return
+        goal   = next((r for r in rows if r[0]==goal_id and str(r[1])==str(user_id)), None)
+        if not goal: await query.edit_message_text("⚠️ Цель не найдена."); return
         await query.edit_message_text(
-            f"➕ Пополнение «{goal[2]}»\n\n"
-            f"Прогресс: {fmt(goal[4])} / {fmt(goal[3])} ₽\n\n"
-            f"Введи сумму:"
-        )
+            f"➕ Пополнение «{goal[2]}»\n\nПрогресс: {fmt(goal[4])} / {fmt(goal[3])} ₽\n\nВведи сумму:")
         return
-
     if data.startswith("goal_del:"):
         goal_id = data[9:]
         sheets  = get_sheets()
         rows    = sheets["goals"].get_all_values()
         for i, r in enumerate(rows[1:], start=2):
-            if r[0] == goal_id and str(r[1]) == str(user_id):
+            if r[0]==goal_id and str(r[1])==str(user_id):
                 sheets["goals"].delete_rows(i)
                 await query.edit_message_text("🗑 Цель удалена.")
                 return
         await query.edit_message_text("⚠️ Цель не найдена.")
-        return
 
-# ── Завершение транзакции ────────────────────────────────────
-async def finish_tx(query, ctx, category: str):
-    user_id  = query.from_user.id
-    tx_type  = ctx.user_data.get("tx_type",   "Расход")
-    amount   = ctx.user_data.get("tx_amount",  0)
-    comment  = ctx.user_data.get("tx_comment", "")
-
-    sheets = get_sheets()
-    sheets["tx"].append_row([
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        user_id, tx_type, amount, category, comment
-    ])
-
-    # Баланс
+async def finish_tx(query, ctx, category):
+    user_id = query.from_user.id
+    tx_type = ctx.user_data.get("tx_type","Расход")
+    amount  = ctx.user_data.get("tx_amount", 0)
+    comment = ctx.user_data.get("tx_comment","")
+    sheets  = get_sheets()
+    sheets["tx"].append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, tx_type, amount, category, comment])
     rows = sheets["tx"].get_all_values()[1:]
-    inc  = sum(float(r[3]) for r in rows if str(r[1]) == str(user_id) and r[2] == "Доход")
-    exp  = sum(float(r[3]) for r in rows if str(r[1]) == str(user_id) and r[2] == "Расход")
-
+    inc  = sum(float(r[3]) for r in rows if str(r[1])==str(user_id) and r[2]=="Доход")
+    exp  = sum(float(r[3]) for r in rows if str(r[1])==str(user_id) and r[2]=="Расход")
     emoji = "📉" if tx_type == "Расход" else "📈"
-    text  = (
-        f"✅ Записано!\n\n"
-        f"{emoji} {tx_type}: {fmt(amount)} ₽\n"
-        f"🏷 {category}"
-        + (f"\n💬 {comment}" if comment else "") +
-        f"\n\n💰 Баланс: {fmt(inc - exp)} ₽"
-    )
-
     ctx.user_data.clear()
-    await query.edit_message_text(text)
+    await query.edit_message_text(
+        f"✅ Записано!\n\n{emoji} {tx_type}: {fmt(amount)} ₽\n🏷 {category}"
+        + (f"\n💬 {comment}" if comment else "")
+        + f"\n\n💰 Баланс: {fmt(inc-exp)} ₽")
     await query.message.reply_text("👇", reply_markup=MAIN_KB)
 
-async def handle_own_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
+async def handle_own_category(update, ctx, text):
     cat     = text.strip()
     user_id = update.effective_user.id
     sheets  = get_sheets()
-
-    # Сохраняем кастомную категорию
-    all_rows = sheets["cats"].get_all_values()[1:]
-    exists   = any(str(r[0]) == str(user_id) and r[1] == cat for r in all_rows if len(r) > 1)
-    if not exists:
+    rows    = sheets["cats"].get_all_values()[1:]
+    if not any(str(r[0])==str(user_id) and r[1]==cat for r in rows if len(r)>1):
         sheets["cats"].append_row([user_id, cat])
-
-    # Завершаем транзакцию
-    tx_type  = ctx.user_data.get("tx_type",   "Расход")
-    amount   = ctx.user_data.get("tx_amount",  0)
-    comment  = ctx.user_data.get("tx_comment", "")
-
-    sheets["tx"].append_row([
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        user_id, tx_type, amount, cat, comment
-    ])
-
+    tx_type = ctx.user_data.get("tx_type","Расход")
+    amount  = ctx.user_data.get("tx_amount", 0)
+    comment = ctx.user_data.get("tx_comment","")
+    sheets["tx"].append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id, tx_type, amount, cat, comment])
     rows = sheets["tx"].get_all_values()[1:]
-    inc  = sum(float(r[3]) for r in rows if str(r[1]) == str(user_id) and r[2] == "Доход")
-    exp  = sum(float(r[3]) for r in rows if str(r[1]) == str(user_id) and r[2] == "Расход")
-
+    inc  = sum(float(r[3]) for r in rows if str(r[1])==str(user_id) and r[2]=="Доход")
+    exp  = sum(float(r[3]) for r in rows if str(r[1])==str(user_id) and r[2]=="Расход")
     emoji = "📉" if tx_type == "Расход" else "📈"
     ctx.user_data.clear()
     await update.message.reply_text(
-        f"✅ Записано!\n\n"
-        f"{emoji} {tx_type}: {fmt(amount)} ₽\n"
-        f"🏷 {cat}"
-        + (f"\n💬 {comment}" if comment else "") +
-        f"\n\n💰 Баланс: {fmt(inc - exp)} ₽",
-        reply_markup=MAIN_KB
-    )
+        f"✅ Записано!\n\n{emoji} {tx_type}: {fmt(amount)} ₽\n🏷 {cat}"
+        + (f"\n💬 {comment}" if comment else "")
+        + f"\n\n💰 Баланс: {fmt(inc-exp)} ₽",
+        reply_markup=MAIN_KB)
 
-# ── Статистика ───────────────────────────────────────────────
-async def show_stats_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([
+async def show_stats_menu(update, ctx):
+    await update.message.reply_text("📊 Выбери статистику:", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("👤 Моя статистика",   callback_data="stats_my")],
         [InlineKeyboardButton("👥 Общая статистика", callback_data="stats_joint")]
-    ])
-    await update.message.reply_text("📊 Выбери статистику:", reply_markup=kb)
+    ]))
 
 async def send_my_stats(query, ctx):
-    user_id = query.from_user.id
-    sheets  = get_sheets()
-    rows    = sheets["tx"].get_all_values()[1:]
-    now     = datetime.now()
-    m, y    = now.month - 1, now.year
-
-    tot_inc = tot_exp = m_inc = m_exp = 0.0
-    cats = {}
-
-    for r in rows:
-        if not r[0] or str(r[1]) != str(user_id):
-            continue
-        try:
-            amt  = float(r[3])
-            date = datetime.strptime(r[0][:10], "%Y-%m-%d")
-            cat  = r[4] or "Другое"
-        except:
-            continue
-
-        if r[2] == "Доход": tot_inc += amt
-        else:               tot_exp += amt
-
-        if date.month - 1 == m and date.year == y:
-            if r[2] == "Доход": m_inc += amt
-            else:
-                m_exp      += amt
-                cats[cat]   = cats.get(cat, 0) + amt
-
-    top = "\n".join(f"  {c} — {fmt(v)} ₽" for c, v in sorted(cats.items(), key=lambda x: -x[1])[:5]) or "  нет данных"
-
-    text = (
-        f"👤 Твоя статистика\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📅 {MONTHS[m]} {y}:\n"
-        f"📈 Доходы:  {fmt(m_inc)} ₽\n"
-        f"📉 Расходы: {fmt(m_exp)} ₽\n"
-        f"💰 Баланс:  {fmt(m_inc - m_exp)} ₽\n\n"
+    data    = get_stats(query.from_user.id)
+    p       = data["personal"]
+    top     = "\n".join(f"  {c} — {fmt(v)} ₽" for c,v in sorted(p["cats"].items(),key=lambda x:-x[1])[:5]) or "  нет данных"
+    await query.edit_message_text(
+        f"👤 Твоя статистика\n━━━━━━━━━━━━━━━\n"
+        f"📅 {data['month']} {data['year']}:\n"
+        f"📈 Доходы:  {fmt(p['monthIncome'])} ₽\n"
+        f"📉 Расходы: {fmt(p['monthExpense'])} ₽\n"
+        f"💰 Баланс:  {fmt(p['monthIncome']-p['monthExpense'])} ₽\n\n"
         f"🏆 Топ расходов:\n{top}\n\n"
         f"📊 За всё время:\n"
-        f"📈 {fmt(tot_inc)} ₽  |  📉 {fmt(tot_exp)} ₽\n"
-        f"💰 Итого: {fmt(tot_inc - tot_exp)} ₽"
-    )
-    await query.edit_message_text(text)
+        f"📈 {fmt(p['income'])} ₽  |  📉 {fmt(p['expense'])} ₽\n"
+        f"💰 Итого: {fmt(p['income']-p['expense'])} ₽")
 
 async def send_joint_stats(query, ctx):
-    sheets = get_sheets()
-    rows   = sheets["tx"].get_all_values()[1:]
-    now    = datetime.now()
-    m, y   = now.month - 1, now.year
-
-    tot_inc = tot_exp = m_inc = m_exp = 0.0
-    per_user = {}
-
-    for r in rows:
-        if not r[0]:
-            continue
-        try:
-            amt  = float(r[3])
-            uid  = str(r[1])
-            date = datetime.strptime(r[0][:10], "%Y-%m-%d")
-        except:
-            continue
-
-        if uid not in per_user:
-            per_user[uid] = {"inc": 0.0, "exp": 0.0}
-
-        if r[2] == "Доход": tot_inc += amt; per_user[uid]["inc"] += amt
-        else:               tot_exp += amt; per_user[uid]["exp"] += amt
-
-        if date.month - 1 == m and date.year == y:
-            if r[2] == "Доход": m_inc += amt
-            else:               m_exp += amt
-
-    lines = ""
-    for uid, v in per_user.items():
-        lbl    = "Пользователь 1" if uid == str(ADMIN_ID) else "Пользователь 2"
-        lines += f"\n{lbl}:\n  📈 {fmt(v['inc'])} ₽  |  📉 {fmt(v['exp'])} ₽\n  💰 {fmt(v['inc']-v['exp'])} ₽"
-
-    text = (
-        f"👥 Общая статистика\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"📅 {MONTHS[m]} {y}:\n"
-        f"📈 Доходы:  {fmt(m_inc)} ₽\n"
-        f"📉 Расходы: {fmt(m_exp)} ₽\n"
-        f"💰 Баланс:  {fmt(m_inc - m_exp)} ₽\n\n"
-        f"📊 За всё время:\n"
-        f"📈 {fmt(tot_inc)} ₽  |  📉 {fmt(tot_exp)} ₽\n"
-        f"💰 Итого: {fmt(tot_inc - tot_exp)} ₽\n\n"
-        f"👥 По пользователям:{lines}"
-    )
-    await query.edit_message_text(text)
-
-# ── Цели ─────────────────────────────────────────────────────
-async def show_goals_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    data = get_stats(ADMIN_ID)
+    j    = data["joint"]
     sheets  = get_sheets()
-    rows    = [r for r in sheets["goals"].get_all_values()[1:] if r[0] and str(r[1]) == str(user_id)]
-    count   = len(rows)
+    rows    = sheets["tx"].get_all_values()[1:]
+    per_user = {}
+    for r in rows:
+        if not r[0]: continue
+        try: amt = float(r[3]); uid = str(r[1])
+        except: continue
+        if uid not in per_user: per_user[uid] = {"inc":0,"exp":0}
+        if r[2]=="Доход": per_user[uid]["inc"]+=amt
+        else:             per_user[uid]["exp"]+=amt
+    lines = ""
+    for uid,v in per_user.items():
+        lbl = "Пользователь 1" if uid==str(ADMIN_ID) else "Пользователь 2"
+        lines += f"\n{lbl}:\n  📈 {fmt(v['inc'])} ₽  |  📉 {fmt(v['exp'])} ₽\n  💰 {fmt(v['inc']-v['exp'])} ₽"
+    await query.edit_message_text(
+        f"👥 Общая статистика\n━━━━━━━━━━━━━━━\n"
+        f"📅 {data['month']} {data['year']}:\n"
+        f"📈 Доходы:  {fmt(j['monthIncome'])} ₽\n"
+        f"📉 Расходы: {fmt(j['monthExpense'])} ₽\n"
+        f"💰 Баланс:  {fmt(j['monthIncome']-j['monthExpense'])} ₽\n\n"
+        f"📊 За всё время:\n"
+        f"📈 {fmt(j['income'])} ₽  |  📉 {fmt(j['expense'])} ₽\n"
+        f"💰 Итого: {fmt(j['income']-j['expense'])} ₽\n\n"
+        f"👥 По пользователям:{lines}")
 
-    kb = InlineKeyboardMarkup([
+async def show_goals_menu(update, ctx):
+    user_id = update.effective_user.id
+    goals   = get_goals_data(user_id)
+    msg     = "🎯 Целей пока нет.\nДобавь первую!" if not goals else f"🎯 Цели накопления ({len(goals)})"
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить цель", callback_data="goals_add")],
         [InlineKeyboardButton("📋 Мои цели",      callback_data="goals_list")]
-    ])
-    msg = "🎯 Целей пока нет.\nДобавь первую!" if count == 0 else f"🎯 Цели накопления ({count})"
-    await update.message.reply_text(msg, reply_markup=kb)
+    ]))
 
 async def show_goals_list(query, ctx):
     user_id = query.from_user.id
-    sheets  = get_sheets()
-    rows    = [r for r in sheets["goals"].get_all_values()[1:] if r[0] and str(r[1]) == str(user_id)]
-
-    if not rows:
-        await query.edit_message_text("🎯 Нет целей. Нажми «Добавить цель».")
-        return
-
+    goals   = get_goals_data(user_id)
+    if not goals:
+        await query.edit_message_text("🎯 Нет целей."); return
     text = "🎯 Твои цели:\n━━━━━━━━━━━━━━━\n"
     btns = []
-
-    for r in rows:
-        try:
-            target  = float(r[3])
-            current = float(r[4]) if r[4] else 0.0
-        except:
-            target = current = 0.0
-
-        pct     = min(100, round(current / target * 100)) if target > 0 else 0
-        remains = max(0, target - current)
-        dl      = f"\n📅 До: {r[5]}" if len(r) > 5 and r[5] else ""
-
-        text += (
-            f"\n🎯 {r[2]}\n"
-            f"{pbar(pct)} {pct}%\n"
-            f"💰 {fmt(current)} / {fmt(target)} ₽\n"
-            f"📌 Осталось: {fmt(remains)} ₽{dl}\n"
-        )
+    for g in goals:
+        pct     = min(100, round(g["current"]/g["target"]*100)) if g["target"]>0 else 0
+        remains = max(0, g["target"]-g["current"])
+        dl      = f"\n📅 До: {g['deadline']}" if g["deadline"] else ""
+        text   += f"\n🎯 {g['name']}\n{pbar(pct)} {pct}%\n💰 {fmt(g['current'])} / {fmt(g['target'])} ₽\n📌 Осталось: {fmt(remains)} ₽{dl}\n"
         btns.append([
-            InlineKeyboardButton(f"➕ {r[2]}", callback_data=f"goal_dep:{r[0]}"),
-            InlineKeyboardButton("🗑",          callback_data=f"goal_del:{r[0]}")
+            InlineKeyboardButton(f"➕ {g['name']}", callback_data=f"goal_dep:{g['id']}"),
+            InlineKeyboardButton("🗑",               callback_data=f"goal_del:{g['id']}")
         ])
-
     btns.append([InlineKeyboardButton("➕ Добавить цель", callback_data="goals_add")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns))
 
-async def finish_add_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE, deadline: str):
-    name    = ctx.user_data.get("goal_name", "")
-    amount  = ctx.user_data.get("goal_amount", 0)
+async def finish_add_goal(update, ctx, deadline):
+    name    = ctx.user_data.get("goal_name","")
+    amount  = ctx.user_data.get("goal_amount",0)
     user_id = update.effective_user.id
-    goal_id = f"g_{user_id}_{int(datetime.now().timestamp())}"
-
-    sheets = get_sheets()
-    sheets["goals"].append_row([goal_id, user_id, name, amount, 0, deadline])
-
+    add_goal(user_id, name, amount, deadline)
     ctx.user_data.clear()
     await update.message.reply_text(
-        f"✅ Цель создана!\n\n"
-        f"🎯 {name}\n"
-        f"💰 {fmt(amount)} ₽\n"
-        f"{'📅 До: ' + deadline if deadline else '📅 Без срока'}",
-        reply_markup=MAIN_KB
-    )
+        f"✅ Цель создана!\n\n🎯 {name}\n💰 {fmt(amount)} ₽\n"
+        f"{'📅 До: '+deadline if deadline else '📅 Без срока'}",
+        reply_markup=MAIN_KB)
 
-async def handle_goal_deposit(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
-    try:
-        amt = float(text.replace(" ", "").replace(",", "."))
-        assert amt > 0
+async def handle_goal_deposit(update, ctx, text):
+    try: amt = float(text.replace(" ","").replace(",",".")); assert amt>0
     except:
-        await update.message.reply_text("⚠️ Введи корректную сумму:", reply_markup=CANCEL_KB)
-        return
-
+        await update.message.reply_text("⚠️ Введи корректную сумму:", reply_markup=CANCEL_KB); return
     goal_id = ctx.user_data.get("deposit_goal_id")
     user_id = update.effective_user.id
-    sheets  = get_sheets()
-    rows    = sheets["goals"].get_all_values()
+    result  = deposit_goal(user_id, goal_id, amt)
+    if not result["success"]:
+        await update.message.reply_text("⚠️ Цель не найдена.", reply_markup=MAIN_KB); return
+    goals = get_goals_data(user_id)
+    goal  = next((g for g in goals if g["id"]==goal_id), None)
+    if goal:
+        pct  = min(100, round(goal["current"]/goal["target"]*100)) if goal["target"]>0 else 0
+        done = goal["current"] >= goal["target"]
+        ctx.user_data.clear()
+        await update.message.reply_text(
+            f"✅ Пополнено на {fmt(amt)} ₽\n\n🎯 {goal['name']}\n{pbar(pct)} {pct}%\n"
+            f"{fmt(goal['current'])} / {fmt(goal['target'])} ₽\n\n"
+            f"{'🎉 Цель достигнута!' if done else f'📌 Осталось: {fmt(max(0,goal[chr(116)+'arget']-goal[chr(99)+'urrent']))} ₽'}",
+            reply_markup=MAIN_KB)
 
-    for i, r in enumerate(rows[1:], start=2):
-        if r[0] == goal_id and str(r[1]) == str(user_id):
-            current = float(r[4]) if r[4] else 0.0
-            new_val = current + amt
-            sheets["goals"].update_cell(i, 5, new_val)
-            target  = float(r[3])
-            pct     = min(100, round(new_val / target * 100)) if target > 0 else 0
-            done    = new_val >= target
-            ctx.user_data.clear()
-            await update.message.reply_text(
-                f"✅ Пополнено на {fmt(amt)} ₽\n\n"
-                f"🎯 {r[2]}\n"
-                f"{pbar(pct)} {pct}%\n"
-                f"{fmt(new_val)} / {fmt(target)} ₽\n\n"
-                f"{'🎉 Цель достигнута! Поздравляю!' if done else f'📌 Осталось: {fmt(max(0, target - new_val))} ₽'}",
-                reply_markup=MAIN_KB
-            )
-            return
-
-    await update.message.reply_text("⚠️ Цель не найдена.", reply_markup=MAIN_KB)
-
-# ── Запуск ───────────────────────────────────────────────────
 def main():
+    # Запускаем API сервер в отдельном потоке
+    api_thread = threading.Thread(target=start_api_server, daemon=True)
+    api_thread.start()
+
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
