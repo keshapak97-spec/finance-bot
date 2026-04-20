@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>FinTrack</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0a0c12;
+    --surface:  #13161f;
+    --surface2: #1c2030;
+    --border:   #252a3a;
+    --accent:   #5b6ef5;
+    --accent2:  #8b9bff;
+    --income:   #27c97a;
+    --expense:  #f25c7a;
+    --text:     #e8eaf6;
+    --muted:    #6b7499;
+    --r:        16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    font-family: 'Manrope', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding-bottom: 76px;
+    overflow-x: hidden;
+  }
+
+  /* ── NAV ── */
+  .nav {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: flex; z-index: 100;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .nav-btn {
+    flex: 1; padding: 10px 4px 12px;
+    background: none; border: none; cursor: pointer;
+    color: var(--muted); font-size: 10px; font-family: 'Manrope', sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    transition: color .2s; font-weight: 600; letter-spacing: .3px;
+  }
+  .nav-btn.active { color: var(--accent2); }
+  .nav-btn svg { width: 22px; height: 22px; }
+
+  /* ── PAGES ── */
+  .page { display: none; padding: 16px; animation: fadeIn .2s ease; }
+  .page.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ── HEADER ── */
+  .page-header { font-size: 22px; font-weight: 800; margin-bottom: 16px; letter-spacing: -.5px; }
+
+  /* ── BALANCE CARD ── */
+  .balance-card {
+    background: linear-gradient(135deg, #1a1d3a 0%, #0f1628 100%);
+    border: 1px solid #2a2f55;
+    border-radius: var(--r); padding: 24px 20px; margin-bottom: 16px;
+    position: relative; overflow: hidden;
+  }
+  .balance-card::before {
+    content: ''; position: absolute; top: -40px; right: -40px;
+    width: 140px; height: 140px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(91,110,245,.2) 0%, transparent 70%);
+  }
+  .balance-label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .5px; text-transform: uppercase; margin-bottom: 8px; }
+  .balance-amount { font-size: 38px; font-weight: 800; letter-spacing: -1.5px; margin-bottom: 20px; }
+  .balance-amount.positive { color: var(--income); }
+  .balance-amount.negative { color: var(--expense); }
+  .balance-row { display: flex; gap: 12px; }
+  .balance-item {
+    flex: 1; background: rgba(255,255,255,.05);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .balance-item .lbl { font-size: 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+  .balance-item .val { font-size: 16px; font-weight: 700; margin-top: 3px; }
+  .income-val { color: var(--income); }
+  .expense-val { color: var(--expense); }
+
+  /* ── SECTION ── */
+  .section-title {
+    font-size: 11px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .7px;
+    margin: 20px 0 10px;
+  }
+
+  /* ── TX LIST ── */
+  .tx-list { display: flex; flex-direction: column; gap: 8px; }
+  .tx-row {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--surface); border-radius: 12px;
+    padding: 12px; border: 1px solid var(--border);
+    transition: transform .1s;
+  }
+  .tx-row:active { transform: scale(.98); }
+  .tx-icon {
+    width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 18px;
+  }
+  .tx-icon.income  { background: rgba(39,201,122,.12); }
+  .tx-icon.expense { background: rgba(242,92,122,.12); }
+  .tx-info { flex: 1; min-width: 0; }
+  .tx-cat  { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tx-date { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .tx-amt  { font-size: 15px; font-weight: 700; white-space: nowrap; }
+  .tx-amt.income  { color: var(--income); }
+  .tx-amt.expense { color: var(--expense); }
+
+  /* ── STATS TABS ── */
+  .tabs { display: flex; background: var(--surface2); border-radius: 10px; padding: 3px; margin-bottom: 16px; }
+  .tab {
+    flex: 1; padding: 8px; text-align: center; border-radius: 8px;
+    border: none; background: none; color: var(--muted);
+    font-size: 13px; font-weight: 600; cursor: pointer; font-family: 'Manrope', sans-serif;
+    transition: all .2s;
+  }
+  .tab.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 8px rgba(0,0,0,.4); }
+
+  /* ── STAT CARD ── */
+  .stat-card {
+    background: var(--surface); border-radius: var(--r);
+    border: 1px solid var(--border); padding: 16px; margin-bottom: 12px;
+  }
+  .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; }
+  .stat-row + .stat-row { border-top: 1px solid var(--border); }
+  .stat-label { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .stat-value { font-size: 15px; font-weight: 700; }
+
+  /* ── CAT BARS ── */
+  .cat-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+  .cat-row + .cat-row { border-top: 1px solid var(--border); }
+  .cat-emoji { font-size: 18px; width: 28px; text-align: center; flex-shrink: 0; }
+  .cat-name  { flex: 1; font-size: 13px; font-weight: 500; }
+  .cat-bar-wrap { flex: 1.5; height: 5px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .cat-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 3px; transition: width .5s ease; }
+  .cat-amt { font-size: 12px; font-weight: 700; color: var(--expense); min-width: 60px; text-align: right; }
+
+  /* ── GOALS ── */
+  .goal-card {
+    background: var(--surface); border-radius: var(--r);
+    border: 1px solid var(--border); padding: 16px; margin-bottom: 10px;
+  }
+  .goal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+  .goal-name   { font-size: 16px; font-weight: 700; }
+  .goal-pct    { font-size: 13px; font-weight: 700; color: var(--accent2); }
+  .goal-progress { height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; margin-bottom: 10px; }
+  .goal-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 4px; transition: width .6s ease; }
+  .goal-amounts { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .goal-remains { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .goal-deadline { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .goal-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+  /* ── BUTTONS ── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 11px 16px; border-radius: 10px; border: none; cursor: pointer;
+    font-size: 14px; font-weight: 600; font-family: 'Manrope', sans-serif;
+    transition: opacity .15s, transform .1s;
+  }
+  .btn:active { opacity: .7; transform: scale(.97); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-outline { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-danger  { background: rgba(242,92,122,.12); color: var(--expense); border: 1px solid rgba(242,92,122,.25); }
+  .btn-sm  { padding: 8px 12px; font-size: 13px; }
+  .btn-block { width: 100%; margin-bottom: 8px; }
+
+  /* ── FORM ── */
+  .form-group { margin-bottom: 14px; }
+  .form-label { font-size: 12px; color: var(--muted); font-weight: 700; letter-spacing: .4px; text-transform: uppercase; margin-bottom: 6px; display: block; }
+  .form-input {
+    width: 100%; padding: 13px 14px;
+    background: var(--surface2); border: 1.5px solid var(--border);
+    border-radius: 10px; color: var(--text);
+    font-size: 15px; font-family: 'Manrope', sans-serif;
+    outline: none; transition: border-color .2s;
+  }
+  .form-input:focus { border-color: var(--accent); }
+
+  /* ── MODAL ── */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.75);
+    display: flex; align-items: flex-end; z-index: 200;
+    opacity: 0; pointer-events: none; transition: opacity .25s;
+  }
+  .modal-overlay.open { opacity: 1; pointer-events: all; }
+  .modal {
+    background: var(--surface); border-radius: 20px 20px 0 0;
+    padding: 20px 20px calc(20px + env(safe-area-inset-bottom));
+    width: 100%;
+    transform: translateY(100%); transition: transform .3s cubic-bezier(.4,0,.2,1);
+  }
+  .modal-overlay.open .modal { transform: translateY(0); }
+  .modal-handle { width: 36px; height: 4px; background: var(--border); border-radius: 2px; margin: 0 auto 16px; }
+  .modal-title { font-size: 17px; font-weight: 800; margin-bottom: 16px; }
+
+  /* ── LOADER ── */
+  .loader { text-align: center; padding: 48px 20px; color: var(--muted); font-size: 14px; }
+  .spinner {
+    width: 32px; height: 32px; border-radius: 50%;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    animation: spin .7s linear infinite; margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── EMPTY ── */
+  .empty { text-align: center; padding: 48px 20px; color: var(--muted); }
+  .empty-icon { font-size: 44px; margin-bottom: 10px; }
+  .empty-text { font-size: 14px; font-weight: 500; }
+
+  /* ── MONTHLY CHART ── */
+  .chart-wrap { overflow-x: auto; padding-bottom: 8px; }
+  .chart { display: flex; align-items: flex-end; gap: 8px; min-width: max-content; height: 100px; padding: 0 4px; }
+  .chart-col { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 32px; }
+  .chart-bar-wrap { flex: 1; display: flex; align-items: flex-end; gap: 2px; width: 100%; }
+  .chart-bar {
+    flex: 1; border-radius: 4px 4px 0 0; min-height: 2px;
+    transition: height .4s ease;
+  }
+  .chart-bar.income  { background: var(--income); opacity: .7; }
+  .chart-bar.expense { background: var(--expense); opacity: .8; }
+  .chart-label { font-size: 9px; color: var(--muted); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- ══ ГЛАВНАЯ ══ -->
+<div id="page-home" class="page active">
+  <div class="balance-card">
+    <div class="balance-label">Твой баланс</div>
+    <div class="balance-amount" id="home-balance">—</div>
+    <div class="balance-row">
+      <div class="balance-item">
+        <div class="lbl">Доходы</div>
+        <div class="val income-val" id="home-income">—</div>
+      </div>
+      <div class="balance-item">
+        <div class="lbl">Расходы</div>
+        <div class="val expense-val" id="home-expense">—</div>
+      </div>
+    </div>
+  </div>
+  <div class="section-title">Последние операции</div>
+  <div id="home-txs" class="tx-list">
+    <div class="loader"><div class="spinner"></div>Загрузка...</div>
+  </div>
+</div>
+
+<!-- ══ СТАТИСТИКА ══ -->
+<div id="page-stats" class="page">
+  <div class="tabs">
+    <button class="tab active" onclick="switchStatsTab('personal')">👤 Моя</button>
+    <button class="tab"        onclick="switchStatsTab('joint')">👥 Общая</button>
+  </div>
+  <div id="stats-content">
+    <div class="loader"><div class="spinner"></div>Загрузка...</div>
+  </div>
+</div>
+
+<!-- ══ ЦЕЛИ ══ -->
+<div id="page-goals" class="page">
+  <button class="btn btn-primary btn-block" onclick="openAddGoal()">➕ Новая цель</button>
+  <div id="goals-list">
+    <div class="loader"><div class="spinner"></div>Загрузка...</div>
+  </div>
+</div>
+
+<!-- ══ ОПЕРАЦИИ ══ -->
+<div id="page-txs" class="page">
+  <div id="all-txs" class="tx-list">
+    <div class="loader"><div class="spinner"></div>Загрузка...</div>
+  </div>
+</div>
+
+<!-- ══ NAV ══ -->
+<nav class="nav">
+  <button class="nav-btn active" id="nav-home"  onclick="showPage('home')">
+    <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    Главная
+  </button>
+  <button class="nav-btn" id="nav-stats" onclick="showPage('stats')">
+    <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+    Статистика
+  </button>
+  <button class="nav-btn" id="nav-goals" onclick="showPage('goals')">
+    <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+    Цели
+  </button>
+  <button class="nav-btn" id="nav-txs" onclick="showPage('txs')">
+    <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    Операции
+  </button>
+</nav>
+
+<!-- ══ МОДАЛКА: ДОБАВИТЬ ЦЕЛЬ ══ -->
+<div class="modal-overlay" id="modal-goal" onclick="closeModalOverlay(event,'modal-goal')">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">🎯 Новая цель</div>
+    <div class="form-group">
+      <label class="form-label">Название</label>
+      <input class="form-input" id="goal-name-inp" placeholder="Отпуск, Машина, iPhone...">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Сумма (₽)</label>
+      <input class="form-input" id="goal-target-inp" type="number" placeholder="100000">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Дедлайн (необязательно)</label>
+      <input class="form-input" id="goal-deadline-inp" type="date">
+    </div>
+    <button class="btn btn-primary btn-block" onclick="submitGoal()">Создать цель</button>
+    <button class="btn btn-outline btn-block" onclick="closeModal('modal-goal')">Отмена</button>
+  </div>
+</div>
+
+<!-- ══ МОДАЛКА: ПОПОЛНИТЬ ЦЕЛЬ ══ -->
+<div class="modal-overlay" id="modal-deposit" onclick="closeModalOverlay(event,'modal-deposit')">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title" id="deposit-title">Пополнить</div>
+    <div class="form-group">
+      <label class="form-label">Сумма (₽)</label>
+      <input class="form-input" id="deposit-inp" type="number" placeholder="5000">
+    </div>
+    <button class="btn btn-primary btn-block" onclick="submitDeposit()">Пополнить</button>
+    <button class="btn btn-outline btn-block" onclick="closeModal('modal-deposit')">Отмена</button>
+  </div>
+</div>
+
+<script>
+// ── CONFIG ──────────────────────────────────────────────────
+const API_URL = "СЮДА_URL_RAILWAY"; // например: https://finance-bot-production.up.railway.app
+
+// ── INIT ────────────────────────────────────────────────────
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready(); tg.expand();
+  tg.setHeaderColor?.('#0a0c12');
+  tg.setBackgroundColor?.('#0a0c12');
+}
+
+function getUserId() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('userId')) return p.get('userId');
+  return tg?.initDataUnsafe?.user?.id?.toString() || null;
+}
+
+const USER_ID = getUserId();
+let statsData  = null;
+let statsTab   = 'personal';
+let depositGoalId = null;
+
+// ── NAV ─────────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.getElementById('nav-' + name).classList.add('active');
+  if (name === 'home')  loadHome();
+  if (name === 'stats') loadStats();
+  if (name === 'goals') loadGoals();
+  if (name === 'txs')   loadTxs();
+}
+
+// ── API ─────────────────────────────────────────────────────
+async function apiFetch(path, method='GET', body=null) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API_URL + path, opts);
+  return r.json();
+}
+
+// ── HOME ─────────────────────────────────────────────────────
+async function loadHome() {
+  if (!USER_ID) { showNoUser('home-txs'); return; }
+  try {
+    const [data, txs] = await Promise.all([
+      apiFetch(`/api/stats?userId=${USER_ID}`),
+      apiFetch(`/api/transactions?userId=${USER_ID}&limit=5`)
+    ]);
+    statsData = data;
+    const p = data.personal;
+    const bal = p.income - p.expense;
+    const balEl = document.getElementById('home-balance');
+    balEl.textContent = fmtNum(bal) + ' ₽';
+    balEl.className = 'balance-amount ' + (bal >= 0 ? 'positive' : 'negative');
+    document.getElementById('home-income').textContent  = '+' + fmtNum(p.monthIncome)  + ' ₽';
+    document.getElementById('home-expense').textContent = '-' + fmtNum(p.monthExpense) + ' ₽';
+
+    const el = document.getElementById('home-txs');
+    el.innerHTML = txs.length ? txs.map(renderTx).join('') : '<div class="empty"><div class="empty-icon">💸</div><div class="empty-text">Операций пока нет</div></div>';
+  } catch(e) { showError('home-txs'); }
+}
+
+function renderTx(tx) {
+  const isInc = tx.type === 'Доход';
+  const emoji = catEmoji(tx.category);
+  const sign  = isInc ? '+' : '-';
+  return `<div class="tx-row">
+    <div class="tx-icon ${isInc?'income':'expense'}">${emoji}</div>
+    <div class="tx-info">
+      <div class="tx-cat">${tx.category||'Другое'}</div>
+      <div class="tx-date">${tx.date}${tx.comment?' · '+tx.comment:''}</div>
+    </div>
+    <div class="tx-amt ${isInc?'income':'expense'}">${sign}${fmtNum(tx.amount)} ₽</div>
+  </div>`;
+}
+
+// ── STATS ────────────────────────────────────────────────────
+async function loadStats() {
+  if (!USER_ID) { showNoUser('stats-content'); return; }
+  if (!statsData) {
+    try { statsData = await apiFetch(`/api/stats?userId=${USER_ID}`); }
+    catch(e) { showError('stats-content'); return; }
+  }
+  renderStats();
+}
+
+function switchStatsTab(tab) {
+  statsTab = tab;
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', (tab==='personal'&&i===0)||(tab==='joint'&&i===1)));
+  if (statsData) renderStats();
+}
+
+function renderStats() {
+  const el  = document.getElementById('stats-content');
+  const d   = statsData;
+  const src = statsTab === 'personal' ? d.personal : d.joint;
+  const bal = src.income - src.expense;
+
+  // Monthly chart
+  const monthly = src.monthly || {};
+  const keys    = Object.keys(monthly).sort().slice(-6);
+  const maxVal  = Math.max(...keys.map(k => Math.max(monthly[k].income||0, monthly[k].expense||0)), 1);
+
+  const chartBars = keys.map(k => {
+    const mo  = monthly[k];
+    const ih  = Math.round((mo.income||0)/maxVal*80);
+    const eh  = Math.round((mo.expense||0)/maxVal*80);
+    const lbl = k.slice(5); // MM
+    return `<div class="chart-col">
+      <div class="chart-bar-wrap">
+        <div class="chart-bar income"  style="height:${ih}px"></div>
+        <div class="chart-bar expense" style="height:${eh}px"></div>
+      </div>
+      <div class="chart-label">${lbl}</div>
+    </div>`;
+  }).join('');
+
+  // Top cats
+  const cats   = statsTab === 'personal' ? (d.personal.cats||{}) : {};
+  const sorted = Object.entries(cats).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  const maxCat = sorted[0]?.[1] || 1;
+  const catsHtml = sorted.map(([c,v]) => `<div class="cat-row">
+    <div class="cat-emoji">${catEmoji(c)}</div>
+    <div class="cat-name">${c}</div>
+    <div class="cat-bar-wrap"><div class="cat-bar" style="width:${Math.round(v/maxCat*100)}%"></div></div>
+    <div class="cat-amt">${fmtNum(v)} ₽</div>
+  </div>`).join('');
+
+  el.innerHTML = `
+    <div class="stat-card">
+      <div style="text-align:center;margin-bottom:4px;font-size:12px;color:var(--muted);font-weight:600">${d.month} ${d.year}</div>
+      <div style="text-align:center;font-size:32px;font-weight:800;letter-spacing:-1px;color:${bal>=0?'var(--income)':'var(--expense)'};margin-bottom:16px">${bal>=0?'+':''}${fmtNum(bal)} ₽</div>
+      <div class="stat-row"><span class="stat-label">📈 Доходы</span><span class="stat-value income-val">+${fmtNum(src.monthIncome)} ₽</span></div>
+      <div class="stat-row"><span class="stat-label">📉 Расходы</span><span class="stat-value expense-val">-${fmtNum(src.monthExpense)} ₽</span></div>
+    </div>
+    ${keys.length>1?`<div class="section-title">График по месяцам</div>
+    <div class="stat-card"><div class="chart-wrap"><div class="chart">${chartBars}</div></div>
+    <div style="display:flex;gap:12px;margin-top:8px;font-size:11px;color:var(--muted)">
+      <span>🟢 Доходы</span><span>🔴 Расходы</span>
+    </div></div>`:''}
+    ${catsHtml?`<div class="section-title">Топ расходов</div><div class="stat-card">${catsHtml}</div>`:''}
+    <div class="section-title">За всё время</div>
+    <div class="stat-card">
+      <div class="stat-row"><span class="stat-label">📈 Доходы</span><span class="stat-value income-val">+${fmtNum(src.income)} ₽</span></div>
+      <div class="stat-row"><span class="stat-label">📉 Расходы</span><span class="stat-value expense-val">-${fmtNum(src.expense)} ₽</span></div>
+      <div class="stat-row"><span class="stat-label">💰 Итого</span><span class="stat-value" style="color:${src.income-src.expense>=0?'var(--income)':'var(--expense)'}">${fmtNum(src.income-src.expense)} ₽</span></div>
+    </div>`;
+}
+
+// ── GOALS ────────────────────────────────────────────────────
+async function loadGoals() {
+  if (!USER_ID) { showNoUser('goals-list'); return; }
+  const el = document.getElementById('goals-list');
+  el.innerHTML = '<div class="loader"><div class="spinner"></div>Загрузка...</div>';
+  try {
+    const goals = await apiFetch(`/api/goals?userId=${USER_ID}`);
+    if (!goals.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">🎯</div><div class="empty-text">Нет целей. Добавь первую!</div></div>';
+      return;
+    }
+    el.innerHTML = goals.map(g => {
+      const pct     = g.target>0 ? Math.min(100,Math.round(g.current/g.target*100)) : 0;
+      const remains = Math.max(0, g.target - g.current);
+      const done    = g.current >= g.target;
+      const dl      = g.deadline ? `<div class="goal-deadline">📅 До: ${g.deadline}</div>` : '';
+      return `<div class="goal-card">
+        <div class="goal-header">
+          <div class="goal-name">${g.name}</div>
+          <div class="goal-pct">${done?'🎉':''}${pct}%</div>
+        </div>
+        <div class="goal-progress"><div class="goal-bar" style="width:${pct}%"></div></div>
+        <div class="goal-amounts"><span>${fmtNum(g.current)} ₽</span><span>${fmtNum(g.target)} ₽</span></div>
+        <div class="goal-remains">📌 Осталось: ${fmtNum(remains)} ₽</div>
+        ${dl}
+        <div class="goal-actions">
+          <button class="btn btn-primary btn-sm" onclick="openDeposit('${g.id}','${g.name}')">➕ Пополнить</button>
+          <button class="btn btn-danger btn-sm"  onclick="deleteGoal('${g.id}')">🗑 Удалить</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { showError('goals-list'); }
+}
+
+function openAddGoal() {
+  document.getElementById('goal-name-inp').value    = '';
+  document.getElementById('goal-target-inp').value  = '';
+  document.getElementById('goal-deadline-inp').value = '';
+  openModal('modal-goal');
+}
+
+async function submitGoal() {
+  const name     = document.getElementById('goal-name-inp').value.trim();
+  const target   = parseFloat(document.getElementById('goal-target-inp').value);
+  const deadline = document.getElementById('goal-deadline-inp').value;
+  if (!name)            { alert('Введи название'); return; }
+  if (!target || target<=0) { alert('Введи сумму'); return; }
+  closeModal('modal-goal');
+  await apiFetch('/api/goals/add', 'POST', { userId: USER_ID, name, target, deadline });
+  loadGoals();
+}
+
+function openDeposit(goalId, goalName) {
+  depositGoalId = goalId;
+  document.getElementById('deposit-title').textContent = '➕ ' + goalName;
+  document.getElementById('deposit-inp').value = '';
+  openModal('modal-deposit');
+}
+
+async function submitDeposit() {
+  const amount = parseFloat(document.getElementById('deposit-inp').value);
+  if (!amount || amount<=0) { alert('Введи сумму'); return; }
+  closeModal('modal-deposit');
+  await apiFetch('/api/goals/deposit', 'POST', { userId: USER_ID, goalId: depositGoalId, amount });
+  statsData = null;
+  loadGoals();
+}
+
+async function deleteGoal(goalId) {
+  if (!confirm('Удалить эту цель?')) return;
+  await apiFetch('/api/goals/delete', 'POST', { userId: USER_ID, goalId });
+  loadGoals();
+}
+
+// ── TXS ─────────────────────────────────────────────────────
+async function loadTxs() {
+  if (!USER_ID) { showNoUser('all-txs'); return; }
+  const el = document.getElementById('all-txs');
+  el.innerHTML = '<div class="loader"><div class="spinner"></div>Загрузка...</div>';
+  try {
+    const txs = await apiFetch(`/api/transactions?userId=${USER_ID}&limit=50`);
+    el.innerHTML = txs.length ? txs.map(renderTx).join('') : '<div class="empty"><div class="empty-icon">💸</div><div class="empty-text">Операций пока нет</div></div>';
+  } catch(e) { showError('all-txs'); }
+}
+
+// ── UTILS ────────────────────────────────────────────────────
+function fmtNum(n) {
+  return Number(n||0).toLocaleString('ru-RU');
+}
+
+function catEmoji(cat) {
+  if (!cat) return '💰';
+  const map = {'Еда':'🍔','Продукты':'🛒','Транспорт':'🚗','Такси':'🚕','Кафе':'☕',
+    'Ресторан':'🍽','Зарплата':'💼','Аванс':'💵','Здоровье':'💊','Аптека':'💊',
+    'Развлечения':'🎮','Одежда':'👕','ЖКХ':'🏠','Связь':'📱','Путешествия':'✈️',
+    'Спорт':'🏋️','Фриланс':'💻','Инвестиции':'📈','Подарок':'🎁','Другое':'💰'};
+  for (const [k,v] of Object.entries(map)) {
+    if (cat.includes(k)) return v;
+  }
+  return '💰';
+}
+
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function closeModalOverlay(e, id) { if (e.target === document.getElementById(id)) closeModal(id); }
+
+function showNoUser(id) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = '<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">Не удалось определить пользователя</div></div>';
+}
+function showError(id) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = '<div class="empty"><div class="empty-icon">❌</div><div class="empty-text">Ошибка загрузки данных</div></div>';
+}
+
+// ── START ────────────────────────────────────────────────────
+loadHome();
+const sp = new URLSearchParams(location.search).get('page');
+if (sp === 'stats') showPage('stats');
+else if (sp === 'goals') showPage('goals');
+</script>
+</body>
+</html>
