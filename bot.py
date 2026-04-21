@@ -8,7 +8,7 @@ from urllib.parse import urlparse, parse_qs
 import threading
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.helpers import WebAppInfo
+from telegram import WebAppInfo
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CommandHandler
 import gspread
 from google.oauth2.service_account import Credentials
