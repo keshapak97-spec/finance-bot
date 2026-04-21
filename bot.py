@@ -7,7 +7,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import threading
 
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.helpers import WebAppInfo
 from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CommandHandler
 import gspread
 from google.oauth2.service_account import Credentials
@@ -56,8 +57,13 @@ def pbar(pct):
 
 # ── Клавиатуры ───────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup(
-    [["Расход", "Доход"], ["Статистика", "Цели"]],
-    resize_keyboard=True, is_persistent=True
+    [
+        ["Расход", "Доход"],
+        ["Статистика", "Цели"],
+        [KeyboardButton("📱 Mini App", web_app=WebAppInfo(url="https://" + os.environ.get('GITHUB_PAGES_URL','')))]
+    ],
+    resize_keyboard=True,
+    is_persistent=True
 )
 CANCEL_KB = ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
 
@@ -256,20 +262,25 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     app_url = f"https://{os.environ.get('GITHUB_PAGES_URL', '')}?userId={user_id}"
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📱 Открыть Mini App", web_app={"url": app_url})
-    ]]) if os.environ.get("GITHUB_PAGES_URL") else None
+    kb = ReplyKeyboardMarkup(
+        [
+            ["Расход", "Доход"],
+            ["Статистика", "Цели"],
+            [KeyboardButton("📱 Mini App", web_app=WebAppInfo(url=app_url))]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
 
     await update.message.reply_text(
         "👋 Привет! Используй кнопки внизу:\n\n"
         "Расход — записать трату\n"
         "Доход — записать поступление\n"
         "Статистика — посмотреть статистику\n"
-        "Цели — цели накопления",
-        reply_markup=MAIN_KB
+        "Цели — цели накопления\n"
+        "📱 Mini App — подробная статистика",
+        reply_markup=kb
     )
-    if kb:
-        await update.message.reply_text("📱 Mini App:", reply_markup=kb)
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
