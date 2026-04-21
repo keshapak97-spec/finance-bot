@@ -580,8 +580,21 @@ async def handle_goal_deposit(update, ctx, text):
             f"{'🎉 Цель достигнута!' if done else f'📌 Осталось: {fmt(max(0,goal[chr(116)+'arget']-goal[chr(99)+'urrent']))} ₽'}",
             reply_markup=MAIN_KB)
 
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+async def send_reminder(app):
+    for uid in ALLOWED:
+        try:
+            await app.bot.send_message(
+                chat_id=uid,
+                text="💰 Не забудь записать расходы и доходы за сегодня!",
+                reply_markup=MAIN_KB
+            )
+        except Exception as e:
+            logger.error(f"Reminder error for {uid}: {e}")
+
 def main():
-    # Запускаем API сервер в отдельном потоке
     api_thread = threading.Thread(target=start_api_server, daemon=True)
     api_thread.start()
 
@@ -589,6 +602,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Планировщик напоминаний
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    scheduler.add_job(send_reminder, "cron", hour=15, minute=0,  args=[app])
+    scheduler.add_job(send_reminder, "cron", hour=22, minute=30, args=[app])
+    scheduler.start()
+
     logger.info("Bot started")
     app.run_polling(drop_pending_updates=True)
 
