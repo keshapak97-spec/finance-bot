@@ -346,9 +346,14 @@ if (tg) {
 }
 
 function getUserId() {
+  // Сначала пробуем получить из Telegram WebApp
+  if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+    return String(tg.initDataUnsafe.user.id);
+  }
+  // Затем из URL параметра
   const p = new URLSearchParams(location.search);
   if (p.get('userId')) return p.get('userId');
-  return tg?.initDataUnsafe?.user?.id?.toString() || null;
+  return null;
 }
 
 const USER_ID = getUserId();
